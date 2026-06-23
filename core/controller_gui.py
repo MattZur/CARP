@@ -2,30 +2,23 @@ import numpy as np
 import logging
 import time
 from datetime import datetime
+#from caen_felib import lib, device, error
 from typing import Optional
 
-from threading import Thread, Event, Lock
-from queue import Queue, Empty
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFrame,
+    QMainWindow,
+    QPushButton,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGroupBox,
+    QLabel,
+    QApplication
+)
 
-# Wrap Qt imports so the script doesn't crash if PySide6 is not installed
-QT_AVAILABLE = False
-try:
-    from PySide6.QtWidgets import (
-        QComboBox,
-        QFrame,
-        QMainWindow,
-        QPushButton,
-        QWidget,
-        QVBoxLayout,
-        QHBoxLayout,
-        QGroupBox,
-        QLabel,
-        QApplication
-    )
-    from PySide6.QtCore import QTimer, QWaitCondition, QMutex, Signal, QThread, QObject
-    QT_AVAILABLE = True
-except ImportError:
-    pass
+from PySide6.QtCore import QTimer, QWaitCondition, QMutex, Signal, QThread, QObject
 
 from caen_felib import lib, device, error
 
@@ -37,23 +30,18 @@ from core.writer import Writer
 from core.tracker import Tracker
 from core.functions import get_ch_mapping
 from felib.digitiser import Digitiser
+from ui import oscilloscope
 
-# Conditionally import ui to prevent ImportError if Qt is missing and gui_enabled=False
-if QT_AVAILABLE:
-    from ui import oscilloscope
-
+from threading import Thread, Event, Lock
+from queue import Queue, Empty
 
 class Controller:
     def __init__(self,
                  dig_config: Optional[str] = None,
-                 rec_config: Optional[str] = None,
-                 gui_enabled: bool = False):
+                 rec_config: Optional[str] = None):
         '''
         Initialise controller for GUI and digitiser
         '''
-        
-        # Store GUI state
-        self.gui_enabled = gui_enabled and QT_AVAILABLE
 
         # Initialise logging and tracking
         setup_logging()
@@ -82,7 +70,7 @@ class Controller:
             cmd_buffer=self.cmd_buffer,
             display_buffer=self.display_buffer,
             stop_event=self.worker_stop_event,
-            sw_timeout=self.sw_timeout
+            sw_timeout = self.sw_timeout
         )
 
         # Set the callback to the controller's data_handling method
@@ -108,28 +96,20 @@ class Controller:
                             TIMESTAMP     = datetime.now().strftime("%H:%M:%S")
                         )
 
-        # GUI setup (conditional)
-        if self.gui_enabled:
-            self.app = QApplication([])
-            self.main_window = oscilloscope.MainWindow(controller=self)
+        # gui second
+        self.app = QApplication([])
+        self.main_window = oscilloscope.MainWindow(controller = self)
 
-            self.fps_timer = QTimer()
-            self.fps_timer.timeout.connect(self.update_fps)
-            self.spf = 1 # seconds per frame
+        self.fps_timer  = QTimer()
+        self.fps_timer.timeout.connect(self.update_fps)
+        self.spf = 1 # seconds per frame
 
-        # Connect to the digitiser
         self.connect_digitiser()
 
-        # If no GUI is enabled, automatically start acquisition and recording
-        if not self.gui_enabled:
-            self.start_acquisition()
-            self.start_recording()
 
     def data_handling(self):
         '''
-        Visualise data and handle writing.
-        Keeping the display buffer clear is mandatory even without a GUI 
-        to prevent the queue from filling up and blocking the worker thread.
+        Visualise data.
         '''
         while True:
             try:
@@ -142,9 +122,8 @@ class Controller:
                 # you must pass wf_size and ADCs through.
                 wf_size, ADCs, ch, timestamp = data
 
-                # update visuals (GUI only)
-                if self.gui_enabled:
-                    self.main_window.screen.update_ch(np.arange(0, wf_size, dtype=wf_size.dtype), ADCs, ch)
+                # update visuals
+                self.main_window.screen.update_ch(np.arange(0, wf_size, dtype=wf_size.dtype), ADCs, ch)
 
                 # ping the tracker (make this optional)
                 self.tracker.track(ADCs.nbytes)
@@ -161,33 +140,37 @@ class Controller:
             except Exception as e:
                 logging.exception(f"Error updating display: {e}")
 
+
     def update_fps(self):
         '''
         Update the FPS label in the GUI
         '''
-        if not self.gui_enabled:
-            return
-            
         fps = 1 / self.spf
         self.main_window.stats_box.fps_label.setText(f"FPS: {fps:.2f}")
 
     def run_app(self):
-        if not self.gui_enabled:
-            logging.warning("run_app() called but GUI is not enabled.")
-            return
-            
         self.main_window.show()
         return self.app.exec()
 
     def connect_digitiser(self):
         '''
         Connect to the digitiser using the provided configuration file.
+        This is a placeholder function and should be replaced with actual
+        digitiser connection logic.
+
+        Need to allow for changing config files after initial application launch.
         '''
+
+        # Load in new configs
+        # self.dig_dict = some other dig_config
+        # self.rec_dict = some other rec_config
+
         self.cmd_buffer.put(Command(CommandType.CONNECT, (self.dig_config, self.rec_config)))
 
-        # Only update the GUI control panel if the GUI exists
-        if self.gui_enabled and hasattr(self, 'main_window'):
+        # Only add to the main window if it exists
+        if hasattr(self, 'main_window'):
             self.main_window.control_panel.acquisition.update()
+
 
     def start_acquisition(self):
         '''
@@ -221,8 +204,7 @@ class Controller:
         self.recording = False
         self.writer_stop_event.set()
 
-        if hasattr(self, 'writer') and self.writer.is_alive():
-            self.writer.join(timeout=2)
+        self.writer.join(timeout=2)
 
         logging.info("Writer thread stopping recording.")
 
@@ -233,43 +215,26 @@ class Controller:
         logging.info("Shutting down controller.")
 
         # Acquisition Worker thread
-        if hasattr(self, 'cmd_buffer'):
-            self.cmd_buffer.put(Command(CommandType.EXIT))
-        if hasattr(self, 'worker_stop_event'):
-            self.worker_stop_event.set()
-        if hasattr(self, 'worker') and self.worker.is_alive():
-            self.worker.join(timeout=2)
+        self.cmd_buffer.put(Command(CommandType.EXIT))
+        self.worker_stop_event.set()
+        self.worker.join(timeout=2)
 
         # Writer threads
-        if hasattr(self, 'writer_stop_event'):
-            self.writer_stop_event.set()
-        if hasattr(self, 'writer') and self.writer.is_alive():
-            self.writer.join(timeout=2)
+        self.writer_stop_event.set()
+        self.writer.join(timeout=2)
 
         clean_shutdown = True
 
-        if hasattr(self, 'worker') and self.worker.is_alive():
+        if self.worker.is_alive():
             clean_shutdown = False
             logging.warning("AcquisitionWorker did not stop cleanly.")
 
-        if hasattr(self, 'writer') and self.writer.is_alive():
+        if self.writer.is_alive():
             clean_shutdown = False
-            # Fixed bug: 'w.ch' was undefined in original code
-            logging.warning("Writer did not stop cleanly.")
+            logging.warning(f"Writer (channel {w.ch}) did not stop cleanly.")
 
         if clean_shutdown:
             logging.info("Controller shutdown complete.")
+
         else:
             logging.info("Controller shutdown failed.")
-
-    def __del__(self):
-        '''
-        Destructor to ensure clean shutdown when the object is garbage collected.
-        '''
-        try:
-            self.stop_recording()
-            self.stop_acquisition()
-            self.shutdown()
-        except Exception:
-            # Suppress exceptions in __del__ to prevent crashes during interpreter shutdown
-            pass
